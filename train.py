@@ -128,30 +128,52 @@ def build_checkpoint(
     }
 
 
-def init_from_baseline(
+def load_matching_weights(
+    model: torch.nn.Module,
+    state_dict: dict,
+    name: str,
+) -> None:
+    """Load only tensors whose names and shapes match the current model.
+
+    This lets a 512/1024 generator reuse the existing lower-resolution blocks
+    from a 256/512 checkpoint while leaving new high-resolution layers random.
+    """
+    model_state = model.state_dict()
+    matched = {}
+    skipped = []
+    for key, value in state_dict.items():
+        if key in model_state and model_state[key].shape == value.shape:
+            matched[key] = value
+        else:
+            skipped.append(key)
+
+    model_state.update(matched)
+    model.load_state_dict(model_state)
+    print(f"  {name}: loaded {len(matched)} tensors, skipped {len(skipped)}")
+
+
+def init_from_checkpoint(
     init_path: Path,
     G: torch.nn.Module,
     D: torch.nn.Module,
     G_ema: EMA,
     device: str,
 ) -> None:
-    """Strict load of G / D / G_ema from a baseline ckpt.
+    """Partial init from a lower-resolution or same-resolution checkpoint."""
+    print(f"Initializing from checkpoint: {init_path}")
+    ckpt = torch.load(init_path, map_location=device, weights_only=False)
 
-    Works out of the box when your architecture matches the baseline 256.
+    if "G_state" not in ckpt:
+        raise RuntimeError(f"Checkpoint has no G_state: {init_path}")
+    load_matching_weights(G, ckpt["G_state"], "G")
 
-    If you scale the architecture (add 512 / 1024 blocks, change channels,
-    swap the up-block design, etc.), this will raise — and that's intentional.
-    The transfer-learning recipe (which keys carry over, how to remap the
-    discriminator's reverse-ordered stage indices, what to do with the
-    last block's shape mismatch) is part of the assignment. Replace this
-    function or write your own loader before scaling.
-    """
-    print(f"Initializing from baseline: {init_path}")
-    ckpt = torch.load(init_path, map_location=device, weights_only=True)
-    G.load_state_dict(ckpt["G_state"])
-    D.load_state_dict(ckpt["D_state"])
-    G_ema.load_state_dict(ckpt["G_ema_state"])
-    print("  Loaded G, D, G_ema (strict)")
+    if "G_ema_state" in ckpt:
+        load_matching_weights(G_ema.shadow, ckpt["G_ema_state"], "G_ema")
+    else:
+        load_matching_weights(G_ema.shadow, ckpt["G_state"], "G_ema")
+
+    if "D_state" in ckpt:
+        load_matching_weights(D, ckpt["D_state"], "D")
 
 
 def main() -> None:
@@ -239,7 +261,7 @@ def main() -> None:
     wandb_run_id: str | None = None
 
     if args.init_from is not None:
-        init_from_baseline(args.init_from, G, D, G_ema, device=device)
+        init_from_checkpoint(args.init_from, G, D, G_ema, device=device)
 
     if args.resume is not None:
         print(f"Resuming from {args.resume}")
