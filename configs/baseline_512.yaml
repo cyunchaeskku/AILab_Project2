@@ -63,7 +63,7 @@ training:
 wandb:
   project: ffhqgen-student
   name: progressive_512
-  mode: disabled
+  mode: online
 
 out:
   run_dir: runs/progressive_512
