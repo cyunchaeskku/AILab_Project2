@@ -27,6 +27,7 @@ FID is intentionally not measured here — measure it yourself between checkpoin
 from __future__ import annotations
 
 import argparse
+import shutil
 import threading
 import time
 from dataclasses import asdict
@@ -71,16 +72,43 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
 
 
-def save_checkpoint(path: Path, state: dict) -> None:
+def copy_checkpoint(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    shutil.copy2(src, tmp)
+    tmp.replace(dst)
+
+
+def save_checkpoint(path: Path, state: dict, backup_path: Path | None = None) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(state, tmp)
     tmp.replace(path)
+    if backup_path is not None:
+        copy_checkpoint(path, backup_path)
 
 
-def async_save_checkpoint(path: Path, state: dict) -> threading.Thread:
-    t = threading.Thread(target=save_checkpoint, args=(path, state), daemon=False)
+def async_save_checkpoint(
+    path: Path,
+    state: dict,
+    backup_path: Path | None = None,
+) -> threading.Thread:
+    t = threading.Thread(target=save_checkpoint, args=(path, state, backup_path), daemon=False)
     t.start()
     return t
+
+
+def latest_checkpoint(search_dirs: list[Path]) -> Path | None:
+    candidates: list[Path] = []
+    for directory in search_dirs:
+        if not directory.is_dir():
+            continue
+        candidates.extend(directory.glob("ckpt_*.pt"))
+        final_path = directory / "final.pt"
+        if final_path.is_file():
+            candidates.append(final_path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 @torch.no_grad()
@@ -189,6 +217,11 @@ def main() -> None:
         help="Path to a full ckpt saved by this same script. Restores "
              "G/D/G_ema/optimizers/RNG/wandb run id.",
     )
+    parser.add_argument(
+        "--auto-resume", action="store_true",
+        help="Resume from latest ckpt in out.run_dir or out.backup_dir if present; "
+             "otherwise fall back to --init-from.",
+    )
     parser.add_argument("--total-images", type=int, default=None)
     parser.add_argument(
         "--new-wandb-run", action="store_true",
@@ -203,6 +236,21 @@ def main() -> None:
     train_cfg = cfg["training"]
     if args.total_images is not None:
         train_cfg["total_images"] = args.total_images
+
+    out_cfg = cfg.get("out", {})
+    run_dir = Path(out_cfg["run_dir"])
+    backup_dir = Path(out_cfg["backup_dir"]) if out_cfg.get("backup_dir") else None
+    if args.auto_resume and args.resume is None:
+        search_dirs = [run_dir]
+        if backup_dir is not None:
+            search_dirs.insert(0, backup_dir)
+        found = latest_checkpoint(search_dirs)
+        if found is not None:
+            args.resume = found
+            args.init_from = None
+            print(f"Auto-resume found checkpoint: {found}")
+        else:
+            print("Auto-resume found no checkpoint; starting from --init-from.")
 
     set_seed(train_cfg["seed"])
     torch.set_float32_matmul_precision("high")
@@ -251,10 +299,12 @@ def main() -> None:
     sample_gen = torch.Generator(device="cpu").manual_seed(train_cfg["sample_seed"])
     sample_z = torch.randn(train_cfg["sample_n"], g_cfg.z_dim, generator=sample_gen).to(device)
 
-    run_dir = Path(cfg["out"]["run_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
     samples_dir = run_dir / "samples"
     samples_dir.mkdir(exist_ok=True)
+    if backup_dir is not None:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Checkpoint backup dir: {backup_dir}")
 
     images_seen = 0
     step = 0
@@ -420,9 +470,12 @@ def main() -> None:
                 wandb_run_id=wandb_run_id,
             )
             ckpt_path = run_dir / f"ckpt_{images_seen:09d}.pt"
+            backup_ckpt_path = (
+                backup_dir / ckpt_path.name if backup_dir is not None else None
+            )
             grid_path = samples_dir / f"grid_{images_seen:09d}.png"
             save_threads = [t for t in save_threads if t.is_alive()]
-            save_threads.append(async_save_checkpoint(ckpt_path, ckpt))
+            save_threads.append(async_save_checkpoint(ckpt_path, ckpt, backup_ckpt_path))
             save_sample_grid(G_ema.shadow, sample_z, grid_path, nrow=8)
             if wandb_mode != "disabled":
                 wandb.log({"samples/grid": wandb.Image(str(grid_path))}, step=step)
@@ -436,7 +489,9 @@ def main() -> None:
         g_cfg=g_cfg, d_cfg=d_cfg, training_cfg=train_cfg,
         wandb_run_id=wandb_run_id,
     )
-    save_checkpoint(run_dir / "final.pt", final_ckpt)
+    final_path = run_dir / "final.pt"
+    backup_final_path = backup_dir / "final.pt" if backup_dir is not None else None
+    save_checkpoint(final_path, final_ckpt, backup_final_path)
     for t in save_threads:
         t.join()
     if run is not None:

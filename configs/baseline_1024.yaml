@@ -34,7 +34,7 @@ discriminator:
 training:
   train_zip: data/train_50k_1024.zip
   resolution: 1024
-  batch_size: 4
+  batch_size: 1
   total_images: 500_000
   num_workers: 2
   flip: true
@@ -55,7 +55,7 @@ training:
   r1_lazy_every: 16
 
   ema_half_life: 10_000
-  ckpt_every: 25_000
+  ckpt_every: 10_000
 
   log_every: 50
   sample_n: 4
@@ -69,3 +69,4 @@ wandb:
 
 out:
   run_dir: runs/progressive_1024
+  backup_dir: /content/drive/MyDrive/AILab_Project2/runs/progressive_1024
