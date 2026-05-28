@@ -107,6 +107,19 @@ progressive:
       lr_g: 0.00025
       lr_d: 0.00025
 
+validation:
+  enabled: true
+  every_images: 100_000
+  n_fake: 512
+  n_real: 2_000
+  batch_size: 8
+  seed: 2026
+  keep_fake: false
+  valid_zips:
+    256: data/valid_10k_256.zip
+    512: data/valid_10k_512.zip
+    1024: data/valid_10k_1024.zip
+
 wandb:
   project: ffhqgen-student
   name: pggan_from_256_to_1024

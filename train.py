@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import shutil
+import sys
 import threading
 import time
 import zipfile
@@ -272,7 +273,7 @@ def write_fake_validation_images(
 
 def run_pytorch_fid(fake_dir: Path, real_dir: Path, device: str) -> float | None:
     cmd = [
-        "python",
+        sys.executable,
         "-m",
         "pytorch_fid",
         str(fake_dir),
@@ -670,6 +671,16 @@ def main() -> None:
         run = wandb.init(**init_kwargs)
         wandb_run_id = run.id
 
+    validation_cfg = cfg.get("validation", {}) or {}
+    validation_enabled = bool(validation_cfg.get("enabled", False))
+    val_every = int(validation_cfg.get("every_images", 100_000))
+    val_n_fake = int(validation_cfg.get("n_fake", 512))
+    val_n_real = int(validation_cfg.get("n_real", 2_000))
+    val_batch_size = int(validation_cfg.get("batch_size", 8))
+    val_seed = int(validation_cfg.get("seed", 2026))
+    val_keep_fake = bool(validation_cfg.get("keep_fake", False))
+    validation_dir = run_dir / "validation"
+
     total_images = train_cfg["total_images"]
     z_dim = g_cfg.z_dim
     r1_gamma = train_cfg["r1_gamma"]
@@ -713,6 +724,7 @@ def main() -> None:
 
     last_ckpt = images_seen
     last_sample = images_seen
+    last_validation = images_seen
     save_threads: list[threading.Thread] = []
     window_t0 = time.perf_counter()
     window_imgs = 0
@@ -880,6 +892,59 @@ def main() -> None:
                 wandb.log({"samples/grid": wandb.Image(str(grid_path))}, step=step)
             print(f"[sample] {grid_path.name}", flush=True)
             last_sample = images_seen
+
+        if validation_enabled and images_seen - last_validation >= val_every:
+            if current_resolution is None:
+                val_resolution = int(train_cfg.get("resolution", g_cfg.resolutions[-1]))
+            else:
+                val_resolution = int(current_resolution)
+            valid_zip = validation_zip_for_resolution(validation_cfg, val_resolution)
+            if valid_zip is None:
+                print(f"[val] no valid zip configured for res={val_resolution}; skipping", flush=True)
+                last_validation = images_seen
+            elif not Path(valid_zip).is_file():
+                print(f"[val] valid zip not found: {valid_zip}; skipping", flush=True)
+                last_validation = images_seen
+            else:
+                print(
+                    f"[val] start imgs={images_seen} res={val_resolution} "
+                    f"fake={val_n_fake} real={val_n_real}",
+                    flush=True,
+                )
+                real_dir = validation_dir / f"real_{val_resolution}_{val_n_real}"
+                fake_dir = validation_dir / f"fake_{images_seen:09d}_{val_resolution}"
+                n_real = extract_validation_subset(
+                    zip_path=valid_zip,
+                    out_dir=real_dir,
+                    max_images=val_n_real,
+                )
+                write_fake_validation_images(
+                    G=G_ema.shadow,
+                    out_dir=fake_dir,
+                    z_dim=z_dim,
+                    n_images=val_n_fake,
+                    batch_size=val_batch_size,
+                    device=device,
+                    seed=val_seed,
+                    resolution=val_resolution if progressive_enabled else None,
+                    alpha=current_alpha if progressive_enabled else 1.0,
+                )
+                fid = run_pytorch_fid(fake_dir, real_dir, device=device)
+                if fid is not None:
+                    print(f"[val] fid={fid:.4f} imgs={images_seen} res={val_resolution}", flush=True)
+                    if wandb_mode != "disabled":
+                        wandb.log(
+                            {
+                                "validation/fid": fid,
+                                "validation/resolution": val_resolution,
+                                "validation/n_fake": val_n_fake,
+                                "validation/n_real": n_real,
+                            },
+                            step=step,
+                        )
+                if not val_keep_fake:
+                    shutil.rmtree(fake_dir, ignore_errors=True)
+                last_validation = images_seen
 
         if images_seen - last_ckpt >= ckpt_every:
             ckpt = build_checkpoint(

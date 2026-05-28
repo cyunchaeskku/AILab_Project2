@@ -8,5 +8,5 @@ wandb>=0.16
 # is optional and only needed to verify your exported model locally.
 onnx>=1.15
 onnxruntime>=1.16
-# For FID measurement, install separately when you set up your evaluation:
-#   pip install pytorch-fid scipy
+pytorch-fid>=0.3.0
+scipy>=1.10
