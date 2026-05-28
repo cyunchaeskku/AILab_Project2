@@ -90,15 +90,15 @@ progressive:
       images: 300_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.00025
-      lr_d: 0.00025
+      lr_g: 0.0001
+      lr_d: 0.00005
     - resolution: 512
       phase: stabilize
       images: 300_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.00025
-      lr_d: 0.00025
+      lr_g: 0.0001
+      lr_d: 0.00005
     - resolution: 1024
       phase: fade
       images: 200_000
