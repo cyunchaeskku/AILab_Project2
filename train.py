@@ -209,6 +209,31 @@ def alpha_for_stage(stage: dict, phase_seen: int) -> float:
     return max(0.0, min(1.0, phase_seen / max(stage["images"], 1)))
 
 
+def batch_diversity_loss(
+    fake: torch.Tensor,
+    *,
+    target: float,
+    max_resolution: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Penalize only very low within-batch image variation.
+
+    This is intentionally bounded with a hinge. Once the generated batch has
+    enough pixel-level spread, the regularizer becomes zero instead of pushing
+    the generator toward noisy outputs.
+    """
+    x = fake.float()
+    if x.shape[-1] > max_resolution:
+        x = F.interpolate(
+            x,
+            size=(max_resolution, max_resolution),
+            mode="bilinear",
+            align_corners=False,
+        )
+    flat = x.flatten(1)
+    diversity = flat.std(dim=0, unbiased=False).mean()
+    return F.relu(fake.new_tensor(float(target)) - diversity), diversity.detach()
+
+
 def resize_real(real: torch.Tensor, resolution: int) -> torch.Tensor:
     if real.shape[-1] == resolution and real.shape[-2] == resolution:
         return real
@@ -693,6 +718,18 @@ def main() -> None:
         int(sample_grid_max_resolution)
         if sample_grid_max_resolution is not None else None
     )
+    diversity_cfg = train_cfg.get("diversity_regularizer", {}) or {}
+    diversity_weight = float(diversity_cfg.get("weight", 0.0))
+    diversity_target = float(diversity_cfg.get("target", 0.12))
+    diversity_every = max(1, int(diversity_cfg.get("every", 1)))
+    diversity_max_resolution = int(diversity_cfg.get("max_resolution", 128))
+    if diversity_weight > 0:
+        print(
+            "Diversity regularizer: "
+            f"weight={diversity_weight} target={diversity_target} "
+            f"every={diversity_every} max_res={diversity_max_resolution}",
+            flush=True,
+        )
     grad_clip_g = float(train_cfg.get("grad_clip_g", float("inf")))
     grad_clip_d = float(train_cfg.get("grad_clip_d", float("inf")))
     precision = train_cfg.get("precision", "fp32")
@@ -814,6 +851,8 @@ def main() -> None:
 
         # --- G step ---
         z = torch.randn(b, z_dim, device=device)
+        diversity_value = None
+        diversity_penalty = None
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
             fake = G(z, resolution=current_resolution, alpha=current_alpha)
             d_fake_g = D(
@@ -822,6 +861,13 @@ def main() -> None:
                 alpha=current_alpha,
             )
             l_g = ns_logistic_g(d_fake_g)
+            if diversity_weight > 0 and (step + 1) % diversity_every == 0:
+                diversity_penalty, diversity_value = batch_diversity_loss(
+                    fake,
+                    target=diversity_target,
+                    max_resolution=diversity_max_resolution,
+                )
+                l_g = l_g + diversity_weight * diversity_penalty
         optG.zero_grad(set_to_none=True)
         l_g.backward()
         grad_norm_g = float(
@@ -854,6 +900,9 @@ def main() -> None:
                 "grad_norm/D": grad_norm_d,
                 "lr": optG.param_groups[0]["lr"],
             }
+            if diversity_value is not None and diversity_penalty is not None:
+                log["diversity/batch_std"] = float(diversity_value.item())
+                log["diversity/penalty"] = float(diversity_penalty.item())
             if last_r1_value is not None:
                 log["loss/R1"] = last_r1_value
             if progressive_enabled:
