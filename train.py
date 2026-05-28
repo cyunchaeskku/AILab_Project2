@@ -120,9 +120,17 @@ def save_sample_grid(
     *,
     resolution: int | None = None,
     alpha: float = 1.0,
+    max_image_resolution: int | None = None,
 ) -> None:
     G.eval()
     fake = G(sample_z, resolution=resolution, alpha=alpha) if resolution is not None else G(sample_z)
+    if max_image_resolution is not None and fake.shape[-1] > max_image_resolution:
+        fake = F.interpolate(
+            fake,
+            size=(max_image_resolution, max_image_resolution),
+            mode="bilinear",
+            align_corners=False,
+        )
     x = ((fake + 1.0) / 2.0).clamp(0.0, 1.0)
     grid = vutils.make_grid(x, nrow=nrow, padding=2)
     vutils.save_image(grid, out_path)
@@ -567,6 +575,12 @@ def main() -> None:
     r1_lazy_every = train_cfg["r1_lazy_every"]
     log_every = train_cfg["log_every"]
     ckpt_every = train_cfg["ckpt_every"]
+    sample_every = int(train_cfg.get("sample_every", ckpt_every))
+    sample_grid_max_resolution = train_cfg.get("sample_grid_max_resolution")
+    sample_grid_max_resolution = (
+        int(sample_grid_max_resolution)
+        if sample_grid_max_resolution is not None else None
+    )
     grad_clip_g = float(train_cfg.get("grad_clip_g", float("inf")))
     grad_clip_d = float(train_cfg.get("grad_clip_d", float("inf")))
     precision = train_cfg.get("precision", "fp32")
@@ -597,6 +611,7 @@ def main() -> None:
         print(f"Dataset: {len(dataset)} images")
 
     last_ckpt = images_seen
+    last_sample = images_seen
     save_threads: list[threading.Thread] = []
     window_t0 = time.perf_counter()
     window_imgs = 0
@@ -737,12 +752,33 @@ def main() -> None:
                 })
             if wandb_mode != "disabled":
                 wandb.log(log, step=step)
-            else:
-                print(
-                    f"step={step} imgs={images_seen} thr={throughput:.1f}img/s "
-                    f"l_d={l_d.item():.3f} l_g={l_g.item():.3f} "
-                    f"gn_g={grad_norm_g:.2f} gn_d={grad_norm_d:.2f}"
+            progress_msg = (
+                f"step={step} imgs={images_seen} thr={throughput:.1f}img/s "
+                f"l_d={l_d.item():.3f} l_g={l_g.item():.3f} "
+                f"gn_g={grad_norm_g:.2f} gn_d={grad_norm_d:.2f}"
+            )
+            if progressive_enabled:
+                progress_msg += (
+                    f" res={current_resolution} phase={current_phase} "
+                    f"alpha={current_alpha:.3f}"
                 )
+            print(progress_msg, flush=True)
+
+        if images_seen - last_sample >= sample_every:
+            grid_path = samples_dir / f"grid_{images_seen:09d}.png"
+            save_sample_grid(
+                G_ema.shadow,
+                sample_z,
+                grid_path,
+                nrow=8,
+                resolution=current_resolution,
+                alpha=current_alpha,
+                max_image_resolution=sample_grid_max_resolution,
+            )
+            if wandb_mode != "disabled":
+                wandb.log({"samples/grid": wandb.Image(str(grid_path))}, step=step)
+            print(f"[sample] {grid_path.name}", flush=True)
+            last_sample = images_seen
 
         if images_seen - last_ckpt >= ckpt_every:
             ckpt = build_checkpoint(
@@ -771,6 +807,7 @@ def main() -> None:
                 nrow=8,
                 resolution=current_resolution,
                 alpha=current_alpha,
+                max_image_resolution=sample_grid_max_resolution,
             )
             if wandb_mode != "disabled":
                 wandb.log({"samples/grid": wandb.Image(str(grid_path))}, step=step)

@@ -60,6 +60,8 @@ training:
 
   ema_half_life: 10_000
   ckpt_every: 25_000
+  sample_every: 10_000
+  sample_grid_max_resolution: 512
 
   log_every: 50
   sample_n: 16
