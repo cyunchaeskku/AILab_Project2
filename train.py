@@ -27,9 +27,11 @@ FID is intentionally not measured here — measure it yourself between checkpoin
 from __future__ import annotations
 
 import argparse
+import subprocess
 import shutil
 import threading
 import time
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 
@@ -38,6 +40,7 @@ import torch
 import torch.nn.functional as F
 import torchvision.utils as vutils
 import yaml
+from PIL import Image
 from torch.utils.data import DataLoader
 
 # wandb is optional — keep training runnable on environments without it.
@@ -209,6 +212,104 @@ def resize_real(real: torch.Tensor, resolution: int) -> torch.Tensor:
     if real.shape[-1] == resolution and real.shape[-2] == resolution:
         return real
     return F.interpolate(real, size=(resolution, resolution), mode="bilinear", align_corners=False)
+
+
+def extract_validation_subset(
+    *,
+    zip_path: str,
+    out_dir: Path,
+    max_images: int,
+) -> int:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = list(out_dir.glob("*.jpg")) + list(out_dir.glob("*.png")) + list(out_dir.glob("*.jpeg"))
+    if len(existing) >= max_images:
+        return len(existing)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = sorted(
+            n for n in zf.namelist()
+            if n.lower().endswith((".png", ".jpg", ".jpeg"))
+        )[:max_images]
+        for idx, name in enumerate(names):
+            suffix = Path(name).suffix.lower() or ".jpg"
+            dst = out_dir / f"real_{idx:06d}{suffix}"
+            if dst.exists():
+                continue
+            with zf.open(name, "r") as src:
+                dst.write_bytes(src.read())
+    return len(names)
+
+
+@torch.no_grad()
+def write_fake_validation_images(
+    *,
+    G: torch.nn.Module,
+    out_dir: Path,
+    z_dim: int,
+    n_images: int,
+    batch_size: int,
+    device: str,
+    seed: int,
+    resolution: int | None,
+    alpha: float,
+) -> None:
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    G.eval()
+    written = 0
+    while written < n_images:
+        b = min(batch_size, n_images - written)
+        z = torch.randn(b, z_dim, generator=gen).to(device)
+        fake = G(z, resolution=resolution, alpha=alpha) if resolution is not None else G(z)
+        fake = ((fake + 1.0) / 2.0).clamp(0.0, 1.0).cpu()
+        for i in range(b):
+            array = (fake[i].permute(1, 2, 0).numpy() * 255.0 + 0.5).astype(np.uint8)
+            Image.fromarray(array).save(out_dir / f"fake_{written + i:06d}.png")
+        written += b
+
+
+def run_pytorch_fid(fake_dir: Path, real_dir: Path, device: str) -> float | None:
+    cmd = [
+        "python",
+        "-m",
+        "pytorch_fid",
+        str(fake_dir),
+        str(real_dir),
+        "--device",
+        "cuda" if device == "cuda" else "cpu",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        print("[val] python executable not found; skipping FID", flush=True)
+        return None
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0:
+        print("[val] pytorch-fid failed; install with `pip install pytorch-fid scipy`", flush=True)
+        print(output.strip()[-1000:], flush=True)
+        return None
+    for line in output.splitlines():
+        if "FID:" in line:
+            try:
+                return float(line.split("FID:")[-1].strip())
+            except ValueError:
+                continue
+    print("[val] could not parse FID output", flush=True)
+    print(output.strip()[-1000:], flush=True)
+    return None
+
+
+def validation_zip_for_resolution(validation_cfg: dict, resolution: int) -> str | None:
+    zips = validation_cfg.get("valid_zips", {}) or {}
+    return zips.get(str(resolution)) or zips.get(int(resolution))
 
 
 def build_checkpoint(
