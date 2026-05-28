@@ -112,12 +112,95 @@ def latest_checkpoint(search_dirs: list[Path]) -> Path | None:
 
 
 @torch.no_grad()
-def save_sample_grid(G: torch.nn.Module, sample_z: torch.Tensor, out_path: Path, nrow: int = 8) -> None:
+def save_sample_grid(
+    G: torch.nn.Module,
+    sample_z: torch.Tensor,
+    out_path: Path,
+    nrow: int = 8,
+    *,
+    resolution: int | None = None,
+    alpha: float = 1.0,
+) -> None:
     G.eval()
-    fake = G(sample_z)
+    fake = G(sample_z, resolution=resolution, alpha=alpha) if resolution is not None else G(sample_z)
     x = ((fake + 1.0) / 2.0).clamp(0.0, 1.0)
     grid = vutils.make_grid(x, nrow=nrow, padding=2)
     vutils.save_image(grid, out_path)
+
+
+def build_loader(
+    *,
+    train_zip: str,
+    flip: bool,
+    batch_size: int,
+    num_workers: int,
+    device: str,
+) -> tuple[ZipImageDataset, DataLoader, object]:
+    dataset = ZipImageDataset(train_zip, flip=flip)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=device == "cuda",
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
+        drop_last=True,
+    )
+    return dataset, loader, infinite_loader(loader)
+
+
+def build_progressive_schedule(cfg: dict, train_cfg: dict) -> list[dict]:
+    stages = cfg.get("stages")
+    if not stages:
+        raise ValueError("progressive.enabled requires progressive.stages")
+    schedule = []
+    cursor = 0
+    default_zip = train_cfg["train_zip"]
+    default_batch = train_cfg["batch_size"]
+    for idx, stage in enumerate(stages):
+        images = int(stage["images"])
+        if images <= 0:
+            raise ValueError(f"progressive.stages[{idx}].images must be positive")
+        resolution = int(stage["resolution"])
+        phase = str(stage.get("phase", "stabilize"))
+        if phase not in ("fade", "stabilize"):
+            raise ValueError(f"Unknown progressive phase: {phase!r}")
+        entry = {
+            "index": idx,
+            "resolution": resolution,
+            "phase": phase,
+            "images": images,
+            "start": cursor,
+            "end": cursor + images,
+            "batch_size": int(stage.get("batch_size", default_batch)),
+            "train_zip": str(stage.get("train_zip", default_zip)),
+            "lr_g": float(stage["lr_g"]) if "lr_g" in stage else None,
+            "lr_d": float(stage["lr_d"]) if "lr_d" in stage else None,
+        }
+        schedule.append(entry)
+        cursor += images
+    return schedule
+
+
+def stage_for_images(schedule: list[dict], images_seen: int) -> tuple[dict, int]:
+    for stage in schedule:
+        if images_seen < stage["end"]:
+            return stage, images_seen - stage["start"]
+    stage = schedule[-1]
+    return stage, stage["images"]
+
+
+def alpha_for_stage(stage: dict, phase_seen: int) -> float:
+    if stage["phase"] != "fade":
+        return 1.0
+    return max(0.0, min(1.0, phase_seen / max(stage["images"], 1)))
+
+
+def resize_real(real: torch.Tensor, resolution: int) -> torch.Tensor:
+    if real.shape[-1] == resolution and real.shape[-2] == resolution:
+        return real
+    return F.interpolate(real, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
 
 def build_checkpoint(
@@ -133,8 +216,9 @@ def build_checkpoint(
     d_cfg: DiscriminatorConfig,
     training_cfg: dict,
     wandb_run_id: str | None,
+    progressive_state: dict | None = None,
 ) -> dict:
-    return {
+    ckpt = {
         "images_seen": images_seen,
         "step": step,
         "G_state": G.state_dict(),
@@ -154,6 +238,9 @@ def build_checkpoint(
             "training_config": training_cfg,
         },
     }
+    if progressive_state is not None:
+        ckpt["progressive_state"] = progressive_state
+    return ckpt
 
 
 def load_matching_weights(
@@ -180,6 +267,86 @@ def load_matching_weights(
     print(f"  {name}: loaded {len(matched)} tensors, skipped {len(skipped)}")
 
 
+def checkpoint_resolution(ckpt: dict, kind: str) -> int:
+    meta = ckpt.get("meta", {}) if isinstance(ckpt.get("meta", {}), dict) else {}
+    if kind == "G":
+        cfg = meta.get("generator_config")
+        if isinstance(cfg, dict) and cfg.get("resolutions"):
+            return int(cfg["resolutions"][-1])
+    if kind == "D":
+        cfg = meta.get("discriminator_config")
+        if isinstance(cfg, dict) and cfg.get("resolutions"):
+            return int(cfg["resolutions"][0])
+    return 256
+
+
+def _replace_stage_index(key: str, shift: int) -> str:
+    parts = key.split(".")
+    if len(parts) >= 3 and parts[0] == "stages" and parts[1].isdigit():
+        parts[1] = str(int(parts[1]) + shift)
+        return ".".join(parts)
+    return key
+
+
+def progressive_target_key(
+    model: torch.nn.Module,
+    key: str,
+    *,
+    source_resolution: int,
+    kind: str,
+) -> str:
+    if kind == "G":
+        target_resolution = model.cfg.resolutions[-1]
+        if source_resolution != target_resolution:
+            if key.startswith("to_rgb."):
+                return f"prev_to_rgbs.{source_resolution}.{key[len('to_rgb.'):]}"
+            if key.startswith("out_norm."):
+                return f"prev_out_norms.{source_resolution}.{key[len('out_norm.'):]}"
+        return key
+
+    if kind == "D":
+        target_resolution = model.cfg.resolutions[0]
+        if source_resolution != target_resolution:
+            if key.startswith("from_rgb."):
+                return f"prev_from_rgbs.{source_resolution}.{key[len('from_rgb.'):]}"
+            if key.startswith("stages."):
+                shift = int(model.stage_unit_start_idx[source_resolution])
+                return _replace_stage_index(key, shift)
+        return key
+
+    return key
+
+
+def load_progressive_weights(
+    model: torch.nn.Module,
+    state_dict: dict,
+    name: str,
+    *,
+    source_resolution: int,
+) -> None:
+    model_state = model.state_dict()
+    matched = {}
+    skipped = []
+    for key, value in state_dict.items():
+        target_key = progressive_target_key(
+            model,
+            key,
+            source_resolution=source_resolution,
+            kind=name,
+        )
+        if target_key in model_state and model_state[target_key].shape == value.shape:
+            matched[target_key] = value
+        else:
+            skipped.append((key, target_key))
+
+    model_state.update(matched)
+    model.load_state_dict(model_state)
+    print(
+        f"  {name}: loaded {len(matched)} tensors with progressive remap "
+        f"(source_res={source_resolution}), skipped {len(skipped)}"
+    )
+
+
 def init_from_checkpoint(
     init_path: Path,
     G: torch.nn.Module,
@@ -193,15 +360,49 @@ def init_from_checkpoint(
 
     if "G_state" not in ckpt:
         raise RuntimeError(f"Checkpoint has no G_state: {init_path}")
-    load_matching_weights(G, ckpt["G_state"], "G")
+    g_source_resolution = checkpoint_resolution(ckpt, "G")
+    d_source_resolution = checkpoint_resolution(ckpt, "D")
+    if getattr(G.cfg, "progressive", False):
+        load_progressive_weights(
+            G,
+            ckpt["G_state"],
+            "G",
+            source_resolution=g_source_resolution,
+        )
+    else:
+        load_matching_weights(G, ckpt["G_state"], "G")
 
     if "G_ema_state" in ckpt:
-        load_matching_weights(G_ema.shadow, ckpt["G_ema_state"], "G_ema")
+        if getattr(G_ema.shadow.cfg, "progressive", False):
+            load_progressive_weights(
+                G_ema.shadow,
+                ckpt["G_ema_state"],
+                "G",
+                source_resolution=g_source_resolution,
+            )
+        else:
+            load_matching_weights(G_ema.shadow, ckpt["G_ema_state"], "G_ema")
     else:
-        load_matching_weights(G_ema.shadow, ckpt["G_state"], "G_ema")
+        if getattr(G_ema.shadow.cfg, "progressive", False):
+            load_progressive_weights(
+                G_ema.shadow,
+                ckpt["G_state"],
+                "G",
+                source_resolution=g_source_resolution,
+            )
+        else:
+            load_matching_weights(G_ema.shadow, ckpt["G_state"], "G_ema")
 
     if "D_state" in ckpt:
-        load_matching_weights(D, ckpt["D_state"], "D")
+        if getattr(D.cfg, "progressive", False):
+            load_progressive_weights(
+                D,
+                ckpt["D_state"],
+                "D",
+                source_resolution=d_source_resolution,
+            )
+        else:
+            load_matching_weights(D, ckpt["D_state"], "D")
 
 
 def main() -> None:
@@ -281,20 +482,24 @@ def main() -> None:
     G_ema = EMA(G, half_life=train_cfg["ema_half_life"])
     G_ema.shadow.to(device)
 
-    dataset = ZipImageDataset(train_cfg["train_zip"], flip=train_cfg["flip"])
-    print(f"Dataset: {len(dataset)} images")
     num_workers = train_cfg["num_workers"]
-    loader = DataLoader(
-        dataset,
-        batch_size=train_cfg["batch_size"],
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=device == "cuda",
-        persistent_workers=num_workers > 0,
-        prefetch_factor=2 if num_workers > 0 else None,
-        drop_last=True,
+    progressive_cfg = cfg.get("progressive", {}) or {}
+    progressive_enabled = bool(progressive_cfg.get("enabled", False))
+    progressive_schedule = (
+        build_progressive_schedule(progressive_cfg, train_cfg)
+        if progressive_enabled else []
     )
-    inf_loader = infinite_loader(loader)
+    if progressive_enabled:
+        schedule_total = progressive_schedule[-1]["end"]
+        if args.total_images is None:
+            train_cfg["total_images"] = schedule_total
+        print("Progressive schedule:")
+        for stage in progressive_schedule:
+            print(
+                f"  #{stage['index']} {stage['phase']} res={stage['resolution']} "
+                f"images={stage['images']} batch={stage['batch_size']} "
+                f"zip={stage['train_zip']}"
+            )
 
     sample_gen = torch.Generator(device="cpu").manual_seed(train_cfg["sample_seed"])
     sample_z = torch.randn(train_cfg["sample_n"], g_cfg.z_dim, generator=sample_gen).to(device)
@@ -373,28 +578,90 @@ def main() -> None:
     augment_policy = train_cfg.get("augment", "") or ""
     print(f"Augment policy: {augment_policy!r}")
 
+    dataset = None
+    loader = None
+    inf_loader = None
+    active_stage_index: int | None = None
+    current_resolution: int | None = None
+    current_alpha = 1.0
+    current_phase = "fixed"
+    current_stage: dict | None = None
+    if not progressive_enabled:
+        dataset, loader, inf_loader = build_loader(
+            train_zip=train_cfg["train_zip"],
+            flip=train_cfg["flip"],
+            batch_size=train_cfg["batch_size"],
+            num_workers=num_workers,
+            device=device,
+        )
+        print(f"Dataset: {len(dataset)} images")
+
     last_ckpt = images_seen
     save_threads: list[threading.Thread] = []
     window_t0 = time.perf_counter()
     window_imgs = 0
     last_r1_value: float | None = None
 
+    batch_desc = "stage-dependent" if progressive_enabled else str(train_cfg["batch_size"])
     print(
         f"Training: images_seen={images_seen} → {total_images} "
-        f"(batch={train_cfg['batch_size']}, device={device})"
+        f"(batch={batch_desc}, device={device})"
     )
 
     while images_seen < total_images:
+        if progressive_enabled:
+            current_stage, phase_seen = stage_for_images(progressive_schedule, images_seen)
+            current_resolution = int(current_stage["resolution"])
+            current_alpha = alpha_for_stage(current_stage, phase_seen)
+            current_phase = str(current_stage["phase"])
+            if active_stage_index != current_stage["index"]:
+                dataset, loader, inf_loader = build_loader(
+                    train_zip=current_stage["train_zip"],
+                    flip=train_cfg["flip"],
+                    batch_size=current_stage["batch_size"],
+                    num_workers=num_workers,
+                    device=device,
+                )
+                active_stage_index = current_stage["index"]
+                print(
+                    f"[stage] #{active_stage_index} {current_phase} "
+                    f"res={current_resolution} alpha={current_alpha:.3f} "
+                    f"batch={current_stage['batch_size']} dataset={len(dataset)}"
+                )
+                if current_stage.get("lr_g") is not None:
+                    for pg in optG.param_groups:
+                        pg["lr"] = current_stage["lr_g"]
+                if current_stage.get("lr_d") is not None:
+                    for pg in optD.param_groups:
+                        pg["lr"] = current_stage["lr_d"]
+                if current_stage.get("lr_g") is not None or current_stage.get("lr_d") is not None:
+                    print(
+                        f"[stage] lr_g={optG.param_groups[0]['lr']:.6g} "
+                        f"lr_d={optD.param_groups[0]['lr']:.6g}"
+                    )
+
+        if inf_loader is None:
+            raise RuntimeError("Training dataloader was not initialized")
         real = next(inf_loader).to(device, non_blocking=True)
+        if current_resolution is not None:
+            real = resize_real(real, current_resolution)
         b = real.size(0)
 
         # --- D step ---
         z = torch.randn(b, z_dim, device=device)
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
             with torch.no_grad():
-                fake = G(z)
-            d_real = D(diff_augment(real, augment_policy))
-            d_fake = D(diff_augment(fake.detach(), augment_policy))
+                fake = G(z, resolution=current_resolution, alpha=current_alpha)
+            d_real = D(
+                diff_augment(real, augment_policy),
+                resolution=current_resolution,
+                alpha=current_alpha,
+            )
+            d_fake = D(
+                diff_augment(fake.detach(), augment_policy),
+                resolution=current_resolution,
+                alpha=current_alpha,
+            )
             l_d_real = F.softplus(-d_real).mean()
             l_d_fake = F.softplus(d_fake).mean()
             l_d = l_d_real + l_d_fake
@@ -403,7 +670,11 @@ def main() -> None:
 
         if (step + 1) % r1_lazy_every == 0:
             l_r1 = r1_lazy_every * r1_penalty(
-                D, diff_augment(real.float(), augment_policy), gamma=r1_gamma,
+                D,
+                diff_augment(real.float(), augment_policy),
+                gamma=r1_gamma,
+                resolution=current_resolution,
+                alpha=current_alpha,
             )
             l_r1.backward()
             last_r1_value = float(l_r1.item()) / r1_lazy_every
@@ -416,8 +687,12 @@ def main() -> None:
         # --- G step ---
         z = torch.randn(b, z_dim, device=device)
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
-            fake = G(z)
-            d_fake_g = D(diff_augment(fake, augment_policy))
+            fake = G(z, resolution=current_resolution, alpha=current_alpha)
+            d_fake_g = D(
+                diff_augment(fake, augment_policy),
+                resolution=current_resolution,
+                alpha=current_alpha,
+            )
             l_g = ns_logistic_g(d_fake_g)
         optG.zero_grad(set_to_none=True)
         l_g.backward()
@@ -453,6 +728,13 @@ def main() -> None:
             }
             if last_r1_value is not None:
                 log["loss/R1"] = last_r1_value
+            if progressive_enabled:
+                log.update({
+                    "progressive/resolution": current_resolution,
+                    "progressive/alpha": current_alpha,
+                    "progressive/stage": active_stage_index,
+                    "progressive/is_fade": 1 if current_phase == "fade" else 0,
+                })
             if wandb_mode != "disabled":
                 wandb.log(log, step=step)
             else:
@@ -468,6 +750,12 @@ def main() -> None:
                 G=G, D=D, G_ema=G_ema, optG=optG, optD=optD,
                 g_cfg=g_cfg, d_cfg=d_cfg, training_cfg=train_cfg,
                 wandb_run_id=wandb_run_id,
+                progressive_state={
+                    "stage": active_stage_index,
+                    "resolution": current_resolution,
+                    "phase": current_phase,
+                    "alpha": current_alpha,
+                } if progressive_enabled else None,
             )
             ckpt_path = run_dir / f"ckpt_{images_seen:09d}.pt"
             backup_ckpt_path = (
@@ -476,7 +764,14 @@ def main() -> None:
             grid_path = samples_dir / f"grid_{images_seen:09d}.png"
             save_threads = [t for t in save_threads if t.is_alive()]
             save_threads.append(async_save_checkpoint(ckpt_path, ckpt, backup_ckpt_path))
-            save_sample_grid(G_ema.shadow, sample_z, grid_path, nrow=8)
+            save_sample_grid(
+                G_ema.shadow,
+                sample_z,
+                grid_path,
+                nrow=8,
+                resolution=current_resolution,
+                alpha=current_alpha,
+            )
             if wandb_mode != "disabled":
                 wandb.log({"samples/grid": wandb.Image(str(grid_path))}, step=step)
             print(f"[ckpt+grid] {ckpt_path.name} / {grid_path.name}")
@@ -488,6 +783,12 @@ def main() -> None:
         G=G, D=D, G_ema=G_ema, optG=optG, optD=optD,
         g_cfg=g_cfg, d_cfg=d_cfg, training_cfg=train_cfg,
         wandb_run_id=wandb_run_id,
+        progressive_state={
+            "stage": active_stage_index,
+            "resolution": current_resolution,
+            "phase": current_phase,
+            "alpha": current_alpha,
+        } if progressive_enabled else None,
     )
     final_path = run_dir / "final.pt"
     backup_final_path = backup_dir / "final.pt" if backup_dir is not None else None

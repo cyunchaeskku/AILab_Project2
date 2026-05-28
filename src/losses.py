@@ -19,8 +19,13 @@ def ns_logistic_g(d_fake: torch.Tensor) -> torch.Tensor:
     return F.softplus(-d_fake).mean()
 
 
-def r1_penalty(D: nn.Module, x_real: torch.Tensor, gamma: float = 10.0) -> torch.Tensor:
+def r1_penalty(
+    D: nn.Module,
+    x_real: torch.Tensor,
+    gamma: float = 10.0,
+    **d_kwargs,
+) -> torch.Tensor:
     x = x_real.detach().requires_grad_(True)
-    d = D(x).sum()
+    d = D(x, **d_kwargs).sum()
     (grad,) = torch.autograd.grad(d, x, create_graph=True)
     return (gamma / 2.0) * grad.pow(2).flatten(1).sum(dim=1).mean()
