@@ -39,7 +39,7 @@ training:
   resolution: 1024
   batch_size: 4
   total_images: 1_350_000
-  num_workers: 4
+  num_workers: 2
   flip: true
 
   # A100 supports bf16 well; switch to fp32 if samples become unstable.
@@ -81,35 +81,35 @@ progressive:
     - resolution: 256
       phase: stabilize
       images: 50_000
-      batch_size: 32
+      batch_size: 16
       train_zip: data/train_50k_256.zip
       lr_g: 0.0005
       lr_d: 0.0005
     - resolution: 512
       phase: fade
       images: 300_000
-      batch_size: 16
+      batch_size: 8
       train_zip: data/train_50k_512.zip
       lr_g: 0.0001
       lr_d: 0.00005
     - resolution: 512
       phase: stabilize
       images: 300_000
-      batch_size: 16
+      batch_size: 8
       train_zip: data/train_50k_512.zip
       lr_g: 0.0001
       lr_d: 0.00005
     - resolution: 1024
       phase: fade
       images: 200_000
-      batch_size: 4
+      batch_size: 2
       train_zip: data/train_50k_1024.zip
       lr_g: 0.00025
       lr_d: 0.00025
     - resolution: 1024
       phase: stabilize
       images: 500_000
-      batch_size: 4
+      batch_size: 2
       train_zip: data/train_50k_1024.zip
       lr_g: 0.00025
       lr_d: 0.00025
@@ -117,9 +117,9 @@ progressive:
 validation:
   enabled: true
   every_images: 100_000
-  n_fake: 512
-  n_real: 2_000
-  batch_size: 8
+  n_fake: 256
+  n_real: 1_000
+  batch_size: 4
   seed: 2026
   keep_fake: false
   valid_zips:
