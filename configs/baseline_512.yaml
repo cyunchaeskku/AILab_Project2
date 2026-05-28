@@ -32,7 +32,7 @@ discriminator:
 training:
   train_zip: data/train_50k_512.zip
   resolution: 512
-  batch_size: 8
+  batch_size: 16
   total_images: 1_000_000
   num_workers: 4
   flip: true
