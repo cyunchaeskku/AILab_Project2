@@ -64,9 +64,43 @@ from src.model import (
 )
 
 
+def _detect_gpu_config_key() -> str:
+    if not torch.cuda.is_available():
+        raise RuntimeError("Auto config requires CUDA GPU, but torch.cuda.is_available() is False")
+    name = torch.cuda.get_device_name(0)
+    upper = name.upper()
+    if "A100" in upper:
+        return "a100"
+    if "L4" in upper:
+        return "l4"
+    raise RuntimeError(
+        f"Unsupported GPU for auto config: {name!r}. Expected NVIDIA A100 or L4."
+    )
+
+
 def load_config(path: Path) -> dict:
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    auto_cfg = cfg.get("auto_config") if isinstance(cfg, dict) else None
+    if auto_cfg:
+        key = _detect_gpu_config_key()
+        if key not in auto_cfg:
+            raise KeyError(f"auto_config missing key for detected GPU: {key}")
+        selected_path = Path(auto_cfg[key])
+        if not selected_path.is_absolute():
+            selected_path = path.parent / selected_path
+        print(
+            f"Auto config selected: {selected_path} "
+            f"(gpu={torch.cuda.get_device_name(0)})",
+            flush=True,
+        )
+        with open(selected_path) as selected_f:
+            cfg = yaml.safe_load(selected_f)
+        cfg.setdefault("meta", {})
+        cfg["meta"]["selected_config"] = str(selected_path)
+        cfg["meta"]["detected_gpu"] = torch.cuda.get_device_name(0)
+    return cfg
 
 
 def set_seed(seed: int) -> None:
