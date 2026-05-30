@@ -129,9 +129,9 @@ validation:
 
 wandb:
   project: ffhqgen-student
-  name: pggan_from_256_to_1024_l4
+  name: pggan_from_256_to_1024_l4_fp32_stable
   mode: online
 
 out:
-  run_dir: runs/pggan_1024
-  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024
+  run_dir: runs/pggan_1024_fp32_stable
+  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024_fp32_stable
