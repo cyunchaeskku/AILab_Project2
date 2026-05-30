@@ -951,6 +951,8 @@ def main() -> None:
             progress_msg = (
                 f"step={step} imgs={images_seen} thr={throughput:.1f}img/s "
                 f"l_d={l_d.item():.3f} l_g={l_g.item():.3f} "
+                f"d_real={d_real.float().mean().item():.3f} "
+                f"d_fake={d_fake.float().mean().item():.3f} "
                 f"gn_g={grad_norm_g:.2f} gn_d={grad_norm_d:.2f}"
             )
             if progressive_enabled:

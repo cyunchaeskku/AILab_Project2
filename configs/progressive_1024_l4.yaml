@@ -42,9 +42,9 @@ training:
   num_workers: 2
   flip: true
 
-  # L4 supports bf16; use smaller batches than A100.
-  precision: bf16
-  augment: color,translation
+  # fp32 is slower but safer for GAN stability and sample quality.
+  precision: fp32
+  augment: translation
 
   lr_g: 0.0005
   lr_d: 0.0005
@@ -52,7 +52,7 @@ training:
   beta2: 0.9
   weight_decay: 0.0
 
-  grad_clip_g: 10.0
+  grad_clip_g: 1.0
   grad_clip_d: 100.0
 
   r1_gamma: 10.0
@@ -90,15 +90,15 @@ progressive:
       images: 300_000
       batch_size: 8
       train_zip: data/train_50k_512.zip
-      lr_g: 0.0001
-      lr_d: 0.00005
+      lr_g: 0.00005
+      lr_d: 0.0001
     - resolution: 512
       phase: stabilize
       images: 300_000
       batch_size: 8
       train_zip: data/train_50k_512.zip
-      lr_g: 0.0001
-      lr_d: 0.00005
+      lr_g: 0.00005
+      lr_d: 0.0001
     - resolution: 1024
       phase: fade
       images: 200_000
