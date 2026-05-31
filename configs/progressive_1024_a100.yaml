@@ -38,13 +38,13 @@ training:
   train_zip: data/train_50k_1024.zip
   resolution: 1024
   batch_size: 4
-  total_images: 1_350_000
+  total_images: 1_750_000
   num_workers: 4
   flip: true
 
   # fp32 is slower but safer for GAN stability and sample quality.
   precision: fp32
-  augment: translation
+  augment: ""
 
   lr_g: 0.0005
   lr_d: 0.0005
@@ -87,17 +87,17 @@ progressive:
       lr_d: 0.0005
     - resolution: 512
       phase: fade
-      images: 300_000
+      images: 400_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.00005
+      lr_g: 0.000025
       lr_d: 0.0001
     - resolution: 512
       phase: stabilize
-      images: 300_000
+      images: 600_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.00005
+      lr_g: 0.000025
       lr_d: 0.0001
     - resolution: 1024
       phase: fade
@@ -129,9 +129,9 @@ validation:
 
 wandb:
   project: ffhqgen-student
-  name: pggan_from_256_to_1024_a100_fp32_stable
+  name: pggan_from_256_to_1024_a100_fp32_safer
   mode: online
 
 out:
-  run_dir: runs/pggan_1024_fp32_stable
-  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024_fp32_stable
+  run_dir: runs/pggan_1024_fp32_safer
+  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024_fp32_safer
