@@ -9,8 +9,8 @@ generator:
     64: 256
     128: 128
     256: 64
-    512: 32
-    1024: 16
+    512: 64
+    1024: 32
   norm_type: gn
   gn_groups: 32
   attention_resolutions: [32]
@@ -19,8 +19,8 @@ generator:
 discriminator:
   resolutions: [1024, 512, 256, 128, 64, 32, 16, 8, 4]
   channels:
-    1024: 16
-    512: 32
+    1024: 32
+    512: 64
     256: 64
     128: 128
     64: 256
@@ -34,17 +34,15 @@ discriminator:
   progressive: true
 
 training:
-  # Used only as fallback; progressive.stages choose the zip per stage.
   train_zip: data/train_50k_1024.zip
   resolution: 1024
   batch_size: 4
-  total_images: 1_750_000
+  total_images: 1_800_000
   num_workers: 4
   flip: true
 
-  # fp32 is slower but safer for GAN stability and sample quality.
   precision: fp32
-  augment: "translation"
+  augment: color,translation
 
   lr_g: 0.0005
   lr_d: 0.0005
@@ -52,7 +50,7 @@ training:
   beta2: 0.9
   weight_decay: 0.0
 
-  grad_clip_g: 1.0
+  grad_clip_g: 10.0
   grad_clip_d: 100.0
 
   r1_gamma: 10.0
@@ -68,7 +66,6 @@ training:
   sample_seed: 42
   seed: 42
 
-  # Helps discourage low-diversity batches without pushing noise forever.
   diversity_regularizer:
     weight: 0.0
     target: 0.12
@@ -90,29 +87,29 @@ progressive:
       images: 400_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.000008
-      lr_d: 0.00004
+      lr_g: 0.0005
+      lr_d: 0.0005
     - resolution: 512
       phase: stabilize
       images: 600_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.000012
-      lr_d: 0.00004
+      lr_g: 0.0003
+      lr_d: 0.0003
     - resolution: 1024
       phase: fade
       images: 200_000
       batch_size: 4
       train_zip: data/train_50k_1024.zip
-      lr_g: 0.000008
-      lr_d: 0.000024
+      lr_g: 0.0003
+      lr_d: 0.0003
     - resolution: 1024
       phase: stabilize
       images: 500_000
       batch_size: 4
       train_zip: data/train_50k_1024.zip
-      lr_g: 0.000016
-      lr_d: 0.00004
+      lr_g: 0.0002
+      lr_d: 0.0002
 
 validation:
   enabled: true
@@ -129,9 +126,9 @@ validation:
 
 wandb:
   project: ffhqgen-student
-  name: pggan_from_256_to_1024_a100_fp32_safer
+  name: pggan_1024_a100_v2
   mode: online
 
 out:
-  run_dir: runs/pggan_1024_fp32_safer
-  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024_fp32_safer
+  run_dir: runs/pggan_1024_v2
+  backup_dir: /content/drive/MyDrive/OpenAILab/project2/pggan_1024_v2
