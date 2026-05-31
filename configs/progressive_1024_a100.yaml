@@ -85,28 +85,28 @@ progressive:
     - resolution: 512
       phase: fade
       images: 400_000
-      batch_size: 16
+      batch_size: 24
       train_zip: data/train_50k_512.zip
       lr_g: 0.0005
       lr_d: 0.0005
     - resolution: 512
       phase: stabilize
       images: 600_000
-      batch_size: 16
+      batch_size: 24
       train_zip: data/train_50k_512.zip
       lr_g: 0.0003
       lr_d: 0.0003
     - resolution: 1024
       phase: fade
       images: 200_000
-      batch_size: 4
+      batch_size: 6
       train_zip: data/train_50k_1024.zip
       lr_g: 0.0003
       lr_d: 0.0003
     - resolution: 1024
       phase: stabilize
       images: 500_000
-      batch_size: 4
+      batch_size: 6
       train_zip: data/train_50k_1024.zip
       lr_g: 0.0002
       lr_d: 0.0002
@@ -114,7 +114,7 @@ progressive:
 validation:
   enabled: true
   every_images: 100_000
-  n_fake: 512
+  n_fake: 2000
   n_real: 2_000
   batch_size: 8
   seed: 2026
