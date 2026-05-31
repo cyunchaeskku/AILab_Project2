@@ -57,7 +57,7 @@ training:
 
   log_every: 50
   sample_n: 16
-  sample_seed: 12345
+  sample_seed: 42
   seed: 42
 
 wandb:
