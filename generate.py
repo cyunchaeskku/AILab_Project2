@@ -30,7 +30,7 @@ from src.model import (
 )
 
 
-def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> Generator:
+def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> tuple[Generator, dict]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if "meta" in ckpt and isinstance(ckpt["meta"], dict) and "generator_config" in ckpt["meta"]:
         g_cfg = GeneratorConfig.from_dict(ckpt["meta"]["generator_config"])
@@ -52,7 +52,7 @@ def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> Generator:
     n_params = sum(p.numel() for p in G.parameters())
     print(f"Architecture: {source_note}")
     print(f"Weights: {weights_note}  ({n_params/1e6:.2f}M params)")
-    return G
+    return G, ckpt
 
 
 @torch.no_grad()
@@ -65,14 +65,40 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-ema", action="store_true")
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=None,
+        help="Progressive checkpoint resolution. Defaults to checkpoint progressive_state.",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help="Progressive fade alpha. Defaults to checkpoint progressive_state.",
+    )
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    G = load_generator(args.ckpt, device=device, use_ema=not args.no_ema)
+    G, ckpt = load_generator(args.ckpt, device=device, use_ema=not args.no_ema)
 
     g_for_z = torch.Generator(device="cpu").manual_seed(args.seed)
     z = torch.randn(args.n, G.z_dim, generator=g_for_z).to(device)
-    fake = G(z)
+    progressive_state = ckpt.get("progressive_state", {}) if isinstance(ckpt, dict) else {}
+    resolution = args.resolution
+    alpha = args.alpha
+    if resolution is None and isinstance(progressive_state, dict):
+        resolution = progressive_state.get("resolution")
+    if alpha is None and isinstance(progressive_state, dict):
+        alpha = progressive_state.get("alpha", 1.0)
+
+    if getattr(G.cfg, "progressive", False) and resolution is not None:
+        resolution = int(resolution)
+        alpha = 1.0 if alpha is None else float(alpha)
+        print(f"Progressive generation: resolution={resolution}, alpha={alpha:.3f}")
+        fake = G(z, resolution=resolution, alpha=alpha)
+    else:
+        fake = G(z)
     x = ((fake + 1.0) / 2.0).clamp(0.0, 1.0)
     grid = vutils.make_grid(x, nrow=args.nrow, padding=2)
     args.out.parent.mkdir(parents=True, exist_ok=True)
