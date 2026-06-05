@@ -27,6 +27,7 @@ FID is intentionally not measured here — measure it yourself between checkpoin
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import shutil
 import sys
@@ -146,7 +147,11 @@ def latest_checkpoint(search_dirs: list[Path]) -> Path | None:
             candidates.append(final_path)
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    def _step_key(p: Path) -> int:
+        m = re.match(r"ckpt_(\d+)\.pt$", p.name)
+        return int(m.group(1)) if m else float("inf")  # final.pt → inf
+
+    return max(candidates, key=_step_key)
 
 
 @torch.no_grad()
