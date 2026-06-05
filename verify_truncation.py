@@ -49,16 +49,28 @@ SEED = 42
 NUM_SAMPLES = 16            # faces per grid
 GRID_NROW = 8
 
-# A/B sweep. alpha=1.0 -> full-1024 path; alpha<1.0 -> fade blend at FADE_RES.
-FADE_RESOLUTION = 1024
-ALPHAS = [1.0, 0.5]
+# How a sub-1024 generation is scaled up to the 1024 contract size.
+# bicubic is sharper-yet-smooth; bilinear softer; nearest blocky. A no-op when
+# the generation is already 1024 (native-1024 or fade-blend paths).
+UPSAMPLE_MODE = "bicubic"
+
+# A/B strategies for constructing the 1024 image: (name, gen_resolution, alpha).
+#   gen_resolution=None        -> full native-1024 path (alpha ignored)
+#   gen_resolution=512         -> clean native 512, then upsampled to 1024
+#   gen_resolution=1024, a<1   -> progressive fade blend at 1024
+STRATEGIES = [
+    ("pure512", 512, 1.0),
+    ("blend1024_a0.50", 1024, 0.5),
+    ("native1024", None, 1.0),
+]
 PSIS = [1.0, 0.7, 0.6, 0.5]
 
 DISPLAY_RESOLUTION = 256   # downscale faces just for the preview grid
 
 # The combo to freeze into submission.onnx for the ONNX round-trip check.
-# Set these to whatever the A/B grids show is best.
-EXPORT_ALPHA = 0.5
+# Set these to whatever the A/B grids show is best (match a STRATEGIES row).
+EXPORT_GEN_RESOLUTION = 512   # None -> native 1024; 512 -> pure-512 upscaled
+EXPORT_ALPHA = 1.0
 EXPORT_PSI = 0.7
 EXPORT_PATH = Path("submission.onnx")
 
@@ -81,11 +93,12 @@ def load_generator(ckpt_path: Path) -> Generator:
 
 
 class TruncationWrapper(nn.Module):
-    """Bake truncation (z*psi) and a fixed (resolution, alpha) into the graph.
+    """Bake truncation (z*psi), the 1024-construction path, and the upsample
+    mode into the graph.
 
-    This is the exact module that gets exported, so whatever it does to z is
-    frozen into submission.onnx. The grader passes plain z ~ N(0, I); inside
-    the graph it becomes z*psi before reaching G.
+    This is the exact module that gets exported, so whatever it does is frozen
+    into submission.onnx. The grader passes plain z ~ N(0, I); inside the graph
+    it becomes z*psi, runs G at gen_resolution, and is scaled to 1024.
     """
 
     def __init__(
@@ -93,48 +106,50 @@ class TruncationWrapper(nn.Module):
         generator: Generator,
         *,
         psi: float = 1.0,
-        resolution: int | None = None,
+        gen_resolution: int | None = None,
         alpha: float = 1.0,
+        upsample_mode: str = "bicubic",
     ) -> None:
         super().__init__()
         self.generator = generator
         self.psi = float(psi)
-        self.resolution = resolution
+        self.gen_resolution = gen_resolution
         self.alpha = float(alpha)
+        self.upsample_mode = upsample_mode
         # export_onnx checks G.z_dim == 512; expose it on the wrapper too.
         self.z_dim = generator.z_dim
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         z = z * self.psi                                    # (B, 512) -> (B, 512)
-        if self.resolution is None or self.alpha >= 1.0:
-            image = self.generator(z)                       # (B, 512) -> (B, 3, R, R)
+        if self.gen_resolution is None:
+            image = self.generator(z)                       # (B, 512) -> (B, 3, 1024, 1024)
         else:
             image = self.generator(
-                z, resolution=self.resolution, alpha=self.alpha
-            )                                               # (B, 512) -> (B, 3, R, R)
+                z, resolution=self.gen_resolution, alpha=self.alpha
+            )                                               # (B, 512) -> (B, 3, gen, gen)
         image = F.interpolate(
             image,
             size=(1024, 1024),
-            mode="bilinear",
+            mode=self.upsample_mode,
             align_corners=False,
-        )                                                   # (B, 3, R, R) -> (B, 3, 1024, 1024)
+        )                                                   # (B, 3, gen, gen) -> (B, 3, 1024, 1024)
         return image
 
 
 @torch.no_grad()
 def render_ab_grids(generator: Generator, device: torch.device) -> None:
-    """Render one preview grid per (alpha, psi) combo using a fixed latent."""
+    """Render one preview grid per (strategy, psi) combo using a fixed latent."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     sample_z = torch.randn(
         NUM_SAMPLES, generator.z_dim,
         generator=torch.Generator().manual_seed(SEED),
     ).to(device)                                            # (NUM_SAMPLES, 512)
 
-    for alpha in ALPHAS:
+    for name, gen_resolution, alpha in STRATEGIES:
         for psi in PSIS:
-            resolution = None if alpha >= 1.0 else FADE_RESOLUTION
             wrapper = TruncationWrapper(
-                generator, psi=psi, resolution=resolution, alpha=alpha
+                generator, psi=psi, gen_resolution=gen_resolution,
+                alpha=alpha, upsample_mode=UPSAMPLE_MODE,
             ).to(device).eval()
 
             fake = wrapper(sample_z)                         # (N, 3, 1024, 1024)
@@ -146,7 +161,7 @@ def render_ab_grids(generator: Generator, device: torch.device) -> None:
             )                                               # (N, 3, 256, 256)
             image = ((fake + 1.0) / 2.0).clamp(0.0, 1.0)
             grid = vutils.make_grid(image, nrow=GRID_NROW, padding=2)
-            out_path = OUT_DIR / f"alpha{alpha:.2f}_psi{psi:.2f}.png"
+            out_path = OUT_DIR / f"{name}_psi{psi:.2f}.png"
             vutils.save_image(grid, out_path)
             print(f"[grid] {out_path}")
 
@@ -182,9 +197,9 @@ def verify_onnx(generator: Generator) -> None:
     """Export the chosen combo and assert ONNX output matches PyTorch."""
     import onnxruntime as ort
 
-    resolution = None if EXPORT_ALPHA >= 1.0 else FADE_RESOLUTION
     wrapper = TruncationWrapper(
-        generator, psi=EXPORT_PSI, resolution=resolution, alpha=EXPORT_ALPHA
+        generator, psi=EXPORT_PSI, gen_resolution=EXPORT_GEN_RESOLUTION,
+        alpha=EXPORT_ALPHA, upsample_mode=UPSAMPLE_MODE,
     ).cpu().eval()
 
     dummy_z = torch.randn(1, generator.z_dim)               # (1, 512)
@@ -199,7 +214,9 @@ def verify_onnx(generator: Generator) -> None:
         dynamic_axes={"z": {0: "batch"}, "image": {0: "batch"}},
         dynamo=False,
     )
-    print(f"[onnx] exported -> {EXPORT_PATH} (psi={EXPORT_PSI}, alpha={EXPORT_ALPHA})")
+    print(f"[onnx] exported -> {EXPORT_PATH} "
+          f"(psi={EXPORT_PSI}, gen_resolution={EXPORT_GEN_RESOLUTION}, "
+          f"alpha={EXPORT_ALPHA}, upsample={UPSAMPLE_MODE})")
 
     # Round-trip: same z through PyTorch wrapper and onnxruntime must agree.
     check_z = torch.randn(
@@ -220,15 +237,15 @@ def verify_onnx(generator: Generator) -> None:
     print(f"[onnx] max |onnx - torch| = {max_abs_diff:.2e}")
     assert max_abs_diff < 1e-3, "ONNX output diverges from PyTorch wrapper"
 
-    # Sanity: with psi<1 the truncated graph must differ from the raw model.
+    # Sanity: with psi<1 the truncated graph must differ from the same path at
+    # psi=1.0 (no truncation), proving z*psi actually changed the output.
     if EXPORT_PSI < 1.0:
+        raw_wrapper = TruncationWrapper(
+            generator, psi=1.0, gen_resolution=EXPORT_GEN_RESOLUTION,
+            alpha=EXPORT_ALPHA, upsample_mode=UPSAMPLE_MODE,
+        ).cpu().eval()
         with torch.no_grad():
-            raw_out = generator(check_z * 1.0).numpy() if resolution is None else \
-                generator(check_z, resolution=resolution, alpha=EXPORT_ALPHA).numpy()
-            raw_out = F.interpolate(
-                torch.from_numpy(raw_out), size=(1024, 1024),
-                mode="bilinear", align_corners=False,
-            ).numpy()
+            raw_out = raw_wrapper(check_z).numpy()
         truncation_effect = float(np.abs(onnx_out - raw_out).max())
         print(f"[onnx] truncation effect vs psi=1.0: {truncation_effect:.3e} "
               f"(should be clearly > 0)")
