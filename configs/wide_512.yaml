@@ -39,7 +39,7 @@ training:
   num_workers: 4
   flip: true
 
-  precision: bf16
+  precision: fp32
   augment: color,translation
 
   lr_g: 0.0005
@@ -76,21 +76,21 @@ progressive:
     - resolution: 256
       phase: stabilize
       images: 50_000
-      batch_size: 32
+      batch_size: 16
       train_zip: data/train_50k_256.zip
       lr_g: 0.0005
       lr_d: 0.0005
     - resolution: 512
       phase: fade
       images: 400_000
-      batch_size: 12
+      batch_size: 6
       train_zip: data/train_50k_512.zip
       lr_g: 0.0005
       lr_d: 0.0005
     - resolution: 512
       phase: stabilize
       images: 850_000
-      batch_size: 12
+      batch_size: 6
       train_zip: data/train_50k_512.zip
       lr_g: 0.0003
       lr_d: 0.0003
