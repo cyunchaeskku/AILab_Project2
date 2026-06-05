@@ -228,6 +228,7 @@ def build_progressive_schedule(cfg: dict, train_cfg: dict) -> list[dict]:
             "train_zip": str(stage.get("train_zip", default_zip)),
             "lr_g": float(stage["lr_g"]) if "lr_g" in stage else None,
             "lr_d": float(stage["lr_d"]) if "lr_d" in stage else None,
+            "ckpt_every": int(stage["ckpt_every"]) if "ckpt_every" in stage else None,
         }
         schedule.append(entry)
         cursor += images
@@ -1036,7 +1037,13 @@ def main() -> None:
                     shutil.rmtree(fake_dir, ignore_errors=True)
                 last_validation = images_seen
 
-        if images_seen - last_ckpt >= ckpt_every:
+        stage_ckpt_every = (
+            current_stage.get("ckpt_every")
+            if progressive_enabled and current_stage is not None
+            else None
+        )
+        effective_ckpt_every = stage_ckpt_every or ckpt_every
+        if images_seen - last_ckpt >= effective_ckpt_every:
             ckpt = build_checkpoint(
                 images_seen=images_seen, step=step,
                 G=G, D=D, G_ema=G_ema, optG=optG, optD=optD,

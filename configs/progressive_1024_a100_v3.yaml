@@ -103,6 +103,7 @@ progressive:
       train_zip: data/train_50k_1024.zip
       lr_g: 0.0003
       lr_d: 0.0003
+      ckpt_every: 10_000   # 1024 throughput is low; save ~3x more often than global
     - resolution: 1024
       phase: stabilize
       images: 500_000
@@ -110,6 +111,7 @@ progressive:
       train_zip: data/train_50k_1024.zip
       lr_g: 0.00005   # 4x lower than v2; D extra suppressed to prevent D winning
       lr_d: 0.00003
+      ckpt_every: 10_000   # 1024 throughput is low; save ~3x more often than global
 
 validation:
   enabled: true
