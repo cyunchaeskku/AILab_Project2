@@ -35,7 +35,7 @@ training:
   train_zip: data/train_50k_512.zip
   resolution: 512
   batch_size: 16
-  total_images: 1_050_000
+  total_images: 1_650_000
   num_workers: 4
   flip: true
 
