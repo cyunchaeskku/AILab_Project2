@@ -472,7 +472,16 @@ def progressive_target_key(
 ) -> str:
     if kind == "G":
         target_resolution = model.cfg.resolutions[-1]
-        if source_resolution != target_resolution:
+        if source_resolution > target_resolution:
+            # higher-res ckpt → lower-res model: remap prev_to_rgbs/prev_out_norms at target_res
+            pfx = f"prev_to_rgbs.{target_resolution}."
+            if key.startswith(pfx):
+                return f"to_rgb.{key[len(pfx):]}"
+            pfx = f"prev_out_norms.{target_resolution}."
+            if key.startswith(pfx):
+                return f"out_norm.{key[len(pfx):]}"
+            return key  # stages.0..N match directly; extra stages skipped by shape check
+        elif source_resolution < target_resolution:
             if key.startswith("to_rgb."):
                 return f"prev_to_rgbs.{source_resolution}.{key[len('to_rgb.'):]}"
             if key.startswith("out_norm."):
@@ -481,7 +490,22 @@ def progressive_target_key(
 
     if kind == "D":
         target_resolution = model.cfg.resolutions[0]
-        if source_resolution != target_resolution:
+        if source_resolution > target_resolution:
+            # higher-res ckpt → lower-res model: shift stage indices down
+            stage_shift = source_resolution.bit_length() - target_resolution.bit_length()
+            pfx = f"prev_from_rgbs.{target_resolution}."
+            if key.startswith(pfx):
+                return f"from_rgb.{key[len(pfx):]}"
+            if key.startswith("stages."):
+                parts = key.split(".")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    new_idx = int(parts[1]) - stage_shift
+                    if new_idx < 0:
+                        return key  # above target resolution, will be skipped
+                    parts[1] = str(new_idx)
+                    return ".".join(parts)
+            return key
+        elif source_resolution < target_resolution:
             if key.startswith("from_rgb."):
                 return f"prev_from_rgbs.{source_resolution}.{key[len('from_rgb.'):]}"
             if key.startswith("stages."):
