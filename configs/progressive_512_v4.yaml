@@ -92,8 +92,8 @@ progressive:
       images: 1_200_000
       batch_size: 16
       train_zip: data/train_50k_512.zip
-      lr_g: 0.0003
-      lr_d: 0.0003
+      lr_g: 0.0001
+      lr_d: 0.0001
 
 validation:
   enabled: true
