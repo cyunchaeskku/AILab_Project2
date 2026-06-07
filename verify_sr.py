@@ -16,10 +16,11 @@ Faithfulness:
 
 Run from the repo root (where src/ and verify_truncation.py live):
     pip install realesrgan basicsr
-    python verify_sr.py
+    python verify_sr.py --ckpt /path/to/ckpt.pt
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import types
 from pathlib import Path
@@ -42,7 +43,7 @@ from basicsr.archs.rrdbnet_arch import RRDBNet
 
 
 # ----------------------------- configuration ----------------------------- #
-CKPT_PATH = Path(
+DEFAULT_CKPT_PATH = Path(
     "/content/drive/MyDrive/OpenAILab/project2/pggan_1024_v2/ckpt_000475176.pt"
 )
 OUT_DIR = Path("runs/sr_512to1024")
@@ -134,11 +135,15 @@ def preview_grid(images_01: torch.Tensor) -> torch.Tensor:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--ckpt", type=Path, default=DEFAULT_CKPT_PATH)
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    generator = load_generator(CKPT_PATH).to(device)
-    print(f"Loaded G_ema from {CKPT_PATH.name} (z_dim={generator.z_dim})")
+    generator = load_generator(args.ckpt).to(device)
+    print(f"Loaded G_ema from {args.ckpt.name} (z_dim={generator.z_dim})")
     sr_model = load_sr_model(device)
     print("Loaded Real-ESRGAN x2plus (512 -> 1024)")
 
