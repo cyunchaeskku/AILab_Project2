@@ -10,3 +10,6 @@ onnx>=1.15
 onnxruntime>=1.16
 pytorch-fid>=0.3.0
 scipy>=1.10
+# SR strategy verification (verify_sr.py / export_sr_onnx.py) — Real-ESRGAN x2plus
+basicsr>=1.4.2
+realesrgan>=0.3.0
