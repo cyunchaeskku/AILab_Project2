@@ -48,7 +48,7 @@ DEFAULT_CKPT_PATH = Path(
 )
 OUT_DIR = Path("runs/sr_512to1024")
 
-SEED = 42
+DEFAULT_SEED = 42
 NUM_SAMPLES = 16
 GRID_NROW = 8
 PREVIEW_RESOLUTION = 256          # downscale only for the comparison grid
@@ -91,11 +91,11 @@ def load_sr_model(device: torch.device) -> RRDBNet:
 
 
 @torch.no_grad()
-def generate_base_faces(generator: torch.nn.Module, device: torch.device) -> torch.Tensor:
+def generate_base_faces(generator: torch.nn.Module, device: torch.device, seed: int) -> torch.Tensor:
     """Render NUM_SAMPLES native-512 faces in [0, 1], with truncation baked in."""
     z = torch.randn(
         NUM_SAMPLES, generator.z_dim,
-        generator=torch.Generator().manual_seed(SEED),
+        generator=torch.Generator().manual_seed(seed),
     ).to(device)                                            # (N, 512)
     z = z * PSI                                             # (N, 512) -> (N, 512)
 
@@ -137,6 +137,7 @@ def preview_grid(images_01: torch.Tensor) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--ckpt", type=Path, default=DEFAULT_CKPT_PATH)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -147,7 +148,7 @@ def main() -> None:
     sr_model = load_sr_model(device)
     print("Loaded Real-ESRGAN x2plus (512 -> 1024)")
 
-    base_512 = generate_base_faces(generator, device)      # (N, 3, 512, 512)
+    base_512 = generate_base_faces(generator, device, args.seed)  # (N, 3, 512, 512)
     sr_1024 = super_resolve(sr_model, base_512, device)    # (N, 3, 1024, 1024)
     bicubic_1024 = F.interpolate(
         base_512, size=(1024, 1024), mode="bicubic", align_corners=False
