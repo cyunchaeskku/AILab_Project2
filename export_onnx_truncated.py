@@ -33,15 +33,21 @@ TARGET_RESOLUTION = 1024
 
 
 class TruncatedSubmissionWrapper(nn.Module):
-    """Run G(z*psi) and resize the image to 1024×1024 with bilinear interpolation."""
+    """Run G(z*psi) at the checkpoint's native resolution, then resize to 1024×1024."""
 
-    def __init__(self, G: nn.Module, psi: float):
+    def __init__(self, G: nn.Module, psi: float, resolution: int | None, alpha: float):
         super().__init__()
         self.G = G
         self.psi = psi
+        self.resolution = resolution
+        self.alpha = alpha
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        x = self.G(z * self.psi)              # (B, 512) -> (B, 3, R, R), [-1, 1]
+        z_trunc = z * self.psi                 # (B, 512) -> (B, 512)
+        if self.resolution is not None and getattr(self.G, "cfg", None) and getattr(self.G.cfg, "progressive", False):
+            x = self.G(z_trunc, resolution=self.resolution, alpha=self.alpha)
+        else:
+            x = self.G(z_trunc)                # (B, 3, R, R), [-1, 1]
         x = F.interpolate(
             x,
             size=(TARGET_RESOLUTION, TARGET_RESOLUTION),
@@ -56,6 +62,8 @@ def export_to_onnx(
     out_path: str | Path,
     *,
     psi: float,
+    resolution: int | None = None,
+    alpha: float = 1.0,
     opset: int = 17,
     batch_size: int = 1,
 ) -> None:
@@ -70,7 +78,7 @@ def export_to_onnx(
         )
 
     G.eval()
-    wrapper = TruncatedSubmissionWrapper(G, psi=psi).eval()
+    wrapper = TruncatedSubmissionWrapper(G, psi=psi, resolution=resolution, alpha=alpha).eval()
 
     dummy_z = torch.randn(batch_size, 512)
     out_path = Path(out_path)
@@ -96,8 +104,8 @@ def export_to_onnx(
           f"[{ref_out.min():.3f}, {ref_out.max():.3f}]")
 
 
-def _load_g(ckpt_path: Path) -> nn.Module:
-    """Load G_ema from a student training ckpt (must carry meta.generator_config)."""
+def _load_g(ckpt_path: Path) -> tuple[nn.Module, int | None, float]:
+    """Load G_ema and progressive_state (resolution, alpha) from a student ckpt."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "meta" not in ckpt or "generator_config" not in ckpt.get("meta", {}):
         raise RuntimeError(
@@ -110,7 +118,11 @@ def _load_g(ckpt_path: Path) -> nn.Module:
     if state is None:
         raise RuntimeError("Checkpoint has neither G_ema_state nor G_state")
     G.load_state_dict(state)
-    return G
+    prog = ckpt.get("progressive_state") or {}
+    resolution = int(prog["resolution"]) if "resolution" in prog else None
+    alpha = float(prog.get("alpha", 1.0))
+    print(f"progressive_state: resolution={resolution}, alpha={alpha:.3f}")
+    return G, resolution, alpha
 
 
 def main() -> None:
@@ -126,8 +138,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
 
-    G = _load_g(args.ckpt)
-    export_to_onnx(G, args.out, psi=args.psi, opset=args.opset, batch_size=args.batch_size)
+    G, resolution, alpha = _load_g(args.ckpt)
+    export_to_onnx(G, args.out, psi=args.psi, resolution=resolution, alpha=alpha,
+                   opset=args.opset, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":
