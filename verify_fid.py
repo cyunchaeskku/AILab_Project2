@@ -27,6 +27,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from train import (
     extract_validation_subset,
@@ -56,11 +57,14 @@ SEED = 2026                                # validation seed (from config)
 # ------------------------------------------------------------------------- #
 
 
-class TruncatedGenerator(nn.Module):
-    """Apply z *= psi, then forward exactly like the bare Generator.
+TARGET_RESOLUTION = 1024
 
-    Keeps the (z, resolution, alpha) signature so it drops straight into
-    write_fake_validation_images without changing the tested pipeline.
+
+class TruncatedGenerator(nn.Module):
+    """Apply z *= psi, forward, then upsample to 1024 to match submission ONNX.
+
+    Upsampling only applies when native output resolution < TARGET_RESOLUTION,
+    so 1024 checkpoints pass through unchanged.
     """
 
     def __init__(self, generator: nn.Module, psi: float) -> None:
@@ -76,8 +80,15 @@ class TruncatedGenerator(nn.Module):
     ) -> torch.Tensor:
         z = z * self.psi                                    # (B, 512) -> (B, 512)
         if resolution is None:
-            return self.generator(z)
-        return self.generator(z, resolution=resolution, alpha=alpha)
+            x = self.generator(z)
+        else:
+            x = self.generator(z, resolution=resolution, alpha=alpha)
+        if x.shape[-1] < TARGET_RESOLUTION:
+            x = F.interpolate(
+                x, size=(TARGET_RESOLUTION, TARGET_RESOLUTION),
+                mode="bilinear", align_corners=False,
+            )                                               # (B, 3, R, R) -> (B, 3, 1024, 1024)
+        return x
 
 
 def main() -> None:
@@ -108,11 +119,11 @@ def main() -> None:
         raise FileNotFoundError(f"Real validation zip not found: {args.valid_zip}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    real_dir = args.out_dir / f"real_{resolution}_{args.num_real}"
+    real_dir = args.out_dir / f"real_1024_{args.num_real}"
     n_real = extract_validation_subset(
         zip_path=args.valid_zip, out_dir=real_dir, max_images=args.num_real
     )
-    print(f"Real set: {n_real} images at {resolution} -> {real_dir}")
+    print(f"Real set: {n_real} images -> {real_dir}")
 
     results: list[tuple[float, float]] = []
     for psi in args.psis:
