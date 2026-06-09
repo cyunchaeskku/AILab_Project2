@@ -48,6 +48,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-ema", action="store_true")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--psi", type=float, default=1.0,
+                        help="Truncation strength (z *= psi). 1.0 = no truncation.")
     args = parser.parse_args()
 
     if args.device:
@@ -62,7 +64,9 @@ def main() -> None:
     G, ckpt = load_generator(args.ckpt, device=device, use_ema=not args.no_ema)
 
     g_for_z = torch.Generator(device="cpu").manual_seed(args.seed)
-    z = torch.randn(args.n, G.z_dim, generator=g_for_z).to(device)
+    z = torch.randn(args.n, G.z_dim, generator=g_for_z).to(device) * args.psi
+    if args.psi != 1.0:
+        print(f"Truncation: psi={args.psi}")
 
     progressive_state = ckpt.get("progressive_state", {}) if isinstance(ckpt, dict) else {}
     resolution = progressive_state.get("resolution") if isinstance(progressive_state, dict) else None
