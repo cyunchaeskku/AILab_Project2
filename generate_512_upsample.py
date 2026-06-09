@@ -18,7 +18,7 @@ import torchvision.utils as vutils
 from src.model import Generator, GeneratorConfig, build_baseline_256_generator
 
 
-def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> Generator:
+def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> tuple[Generator, dict]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     if "meta" in ckpt and "generator_config" in ckpt["meta"]:
         g_cfg = GeneratorConfig.from_dict(ckpt["meta"]["generator_config"])
@@ -35,7 +35,7 @@ def load_generator(ckpt_path: Path, device: str, use_ema: bool) -> Generator:
     n_params = sum(p.numel() for p in G.parameters())
     print(f"Loaded {'G_ema' if use_ema and 'G_ema_state' in ckpt else 'G'} "
           f"({n_params/1e6:.2f}M params, z_dim={G.z_dim})")
-    return G
+    return G, ckpt
 
 
 @torch.no_grad()
@@ -59,12 +59,23 @@ def main() -> None:
     else:
         device = "cpu"
 
-    G = load_generator(args.ckpt, device=device, use_ema=not args.no_ema)
+    G, ckpt = load_generator(args.ckpt, device=device, use_ema=not args.no_ema)
 
     g_for_z = torch.Generator(device="cpu").manual_seed(args.seed)
     z = torch.randn(args.n, G.z_dim, generator=g_for_z).to(device)
 
-    fake = G(z)                                                    # (N, 3, 512, 512)
+    progressive_state = ckpt.get("progressive_state", {}) if isinstance(ckpt, dict) else {}
+    resolution = progressive_state.get("resolution") if isinstance(progressive_state, dict) else None
+    alpha = progressive_state.get("alpha", 1.0) if isinstance(progressive_state, dict) else 1.0
+
+    if getattr(G.cfg, "progressive", False) and resolution is not None:
+        resolution = int(resolution)
+        alpha = float(alpha)
+        print(f"Progressive generation: resolution={resolution}, alpha={alpha:.3f}")
+        fake = G(z, resolution=resolution, alpha=alpha)
+    else:
+        fake = G(z)
+
     fake_1024 = F.interpolate(
         fake, size=(1024, 1024), mode="bilinear", align_corners=False
     )                                                              # (N, 3, 1024, 1024)
