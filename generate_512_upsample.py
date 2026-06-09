@@ -44,7 +44,7 @@ def main() -> None:
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("sample_512_upsample.png"))
     parser.add_argument("--n", type=int, default=16)
-    parser.add_argument("--nrow", type=int, default=4)
+    parser.add_argument("--nrow", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-ema", action="store_true")
     parser.add_argument("--device", default=None)
