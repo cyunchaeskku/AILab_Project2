@@ -22,6 +22,7 @@ Run from the repo root:
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import torch
@@ -82,38 +83,55 @@ class TruncatedGenerator(nn.Module):
 def main() -> None:
     import shutil
 
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--ckpt", type=Path, default=CKPT_PATH)
+    parser.add_argument("--psis", type=float, nargs="+", default=PSIS)
+    parser.add_argument("--valid-zip", type=str, default=VALID_ZIP)
+    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--num-fake", type=int, default=NUM_FAKE)
+    parser.add_argument("--num-real", type=int, default=NUM_REAL)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    args = parser.parse_args()
+
+    # Read resolution and alpha directly from checkpoint progressive_state
+    raw_ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    prog = raw_ckpt.get("progressive_state", {}) or {}
+    resolution = int(prog.get("resolution", RESOLUTION))
+    alpha = float(prog.get("alpha", 1.0))
+    print(f"Checkpoint progressive_state: resolution={resolution}, alpha={alpha:.3f}")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    generator = load_generator(CKPT_PATH).to(device)
-    print(f"Loaded G_ema from {CKPT_PATH.name} (z_dim={generator.z_dim})")
+    generator = load_generator(args.ckpt).to(device)
+    print(f"Loaded G_ema from {args.ckpt.name} (z_dim={generator.z_dim})")
 
-    if not Path(VALID_ZIP).is_file():
-        raise FileNotFoundError(f"Real validation zip not found: {VALID_ZIP}")
+    if not Path(args.valid_zip).is_file():
+        raise FileNotFoundError(f"Real validation zip not found: {args.valid_zip}")
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    real_dir = OUT_DIR / f"real_{RESOLUTION}_{NUM_REAL}"
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    real_dir = args.out_dir / f"real_{resolution}_{args.num_real}"
     n_real = extract_validation_subset(
-        zip_path=VALID_ZIP, out_dir=real_dir, max_images=NUM_REAL
+        zip_path=args.valid_zip, out_dir=real_dir, max_images=args.num_real
     )
-    print(f"Real set: {n_real} images at {RESOLUTION} -> {real_dir}")
+    print(f"Real set: {n_real} images at {resolution} -> {real_dir}")
 
     results: list[tuple[float, float]] = []
-    for psi in PSIS:
-        fake_dir = OUT_DIR / f"fake_psi{psi:.2f}"
-        print(f"\n[psi={psi:.2f}] generating {NUM_FAKE} fakes "
-              f"(resolution={RESOLUTION}, alpha={ALPHA})...")
+    for psi in args.psis:
+        fake_dir = args.out_dir / f"fake_psi{psi:.2f}"
+        print(f"\n[psi={psi:.2f}] generating {args.num_fake} fakes "
+              f"(resolution={resolution}, alpha={alpha:.3f})...")
         write_fake_validation_images(
             G=TruncatedGenerator(generator, psi),
             out_dir=fake_dir,
             z_dim=generator.z_dim,
-            n_images=NUM_FAKE,
-            batch_size=BATCH_SIZE,
+            n_images=args.num_fake,
+            batch_size=args.batch_size,
             device=device,
             seed=SEED,
-            resolution=RESOLUTION,
-            alpha=ALPHA,
+            resolution=resolution,
+            alpha=alpha,
         )
         fid = run_pytorch_fid(fake_dir, real_dir, device=device)
-        shutil.rmtree(fake_dir, ignore_errors=True)        # free disk between psi
+        shutil.rmtree(fake_dir, ignore_errors=True)
         if fid is None:
             print(f"[psi={psi:.2f}] FID failed (install pytorch-fid scipy)")
             continue
